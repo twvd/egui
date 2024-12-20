@@ -268,6 +268,8 @@ pub enum WgpuSetup {
         ///
         /// This is generally a "software" implementation on the system.
         /// In particular useful for running on CI without a GPU and as a reference for testing.
+        /// Note that not all platforms/setups may have a fallback adapter.
+        ///
         /// Defaults to `false`.
         force_fallback_adapter: bool,
 

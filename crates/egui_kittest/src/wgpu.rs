@@ -3,7 +3,7 @@ use std::{iter::once, sync::Arc};
 use image::RgbaImage;
 
 use egui_wgpu::{
-    wgpu::{self, Backends, InstanceDescriptor, StoreOp, TextureFormat},
+    wgpu::{self, StoreOp, TextureFormat},
     ScreenDescriptor,
 };
 
@@ -16,32 +16,41 @@ pub struct TestRenderer {
     dithering: bool,
 }
 
-impl Default for TestRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TestRenderer {
-    /// Create a new [`TestRenderer`] using a default [`wgpu::Instance`].
-    pub fn new() -> Self {
-        let instance = wgpu::Instance::new(InstanceDescriptor::default());
+    /// Create a new [`TestRenderer`] using a [`egui_wgpu::WgpuSetup`].
+    pub fn new(wgpu_setup: &egui_wgpu::WgpuSetup) -> Self {
+        let (device, queue) = match wgpu_setup {
+            egui_wgpu::WgpuSetup::CreateNew {
+                supported_backends,
+                power_preference,
+                force_fallback_adapter,
+                device_descriptor,
+                trace_path,
+            } => {
+                let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                    backends: *supported_backends,
+                    ..Default::default()
+                });
+                let adapter =
+                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: *power_preference,
+                        force_fallback_adapter: *force_fallback_adapter,
+                        compatible_surface: None,
+                    }))
+                    .expect("No adapter found");
 
-        let adapters = instance.enumerate_adapters(Backends::all());
-        let adapter = adapters.first().expect("No adapter found");
+                let device_descriptor = device_descriptor(&adapter);
+                let (device, queue) = pollster::block_on(
+                    adapter.request_device(&device_descriptor, trace_path.as_deref()),
+                )
+                .expect("Failed to request device");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("Egui Device"),
-                memory_hints: Default::default(),
-                required_limits: Default::default(),
-                required_features: Default::default(),
-            },
-            None,
-        ))
-        .expect("Failed to create device");
+                (Arc::new(device), Arc::new(queue))
+            }
+            egui_wgpu::WgpuSetup::Existing { device, queue, .. } => (device.clone(), queue.clone()),
+        };
 
-        Self::create(Arc::new(device), Arc::new(queue))
+        Self::create(device, queue)
     }
 
     /// Create a new [`TestRenderer`] using the provided [`wgpu::Device`] and [`wgpu::Queue`].

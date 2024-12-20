@@ -1,8 +1,12 @@
 use crate::Harness;
 use image::ImageError;
+
 use std::fmt::Display;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "wgpu")]
+use egui_wgpu::wgpu;
 
 #[non_exhaustive]
 pub struct SnapshotOptions {
@@ -14,6 +18,13 @@ pub struct SnapshotOptions {
     /// The path where the snapshots will be saved.
     /// The default is `tests/snapshots`.
     pub output_path: PathBuf,
+
+    /// Configures the wgpu renderer setup.
+    ///
+    /// Note that no [`wgpu::Surface`] is needed for the snapshot tests,
+    /// therefore adapter creation doesn't have to be constrained on compatible surfaces.
+    #[cfg(feature = "wgpu")]
+    pub wgpu_setup: egui_wgpu::WgpuSetup,
 }
 
 impl Default for SnapshotOptions {
@@ -21,7 +32,31 @@ impl Default for SnapshotOptions {
         Self {
             threshold: 0.6,
             output_path: PathBuf::from("tests/snapshots"),
+            #[cfg(feature = "wgpu")]
+            wgpu_setup: default_wgpu_setup(),
         }
+    }
+}
+
+#[cfg(feature = "wgpu")]
+fn default_wgpu_setup() -> egui_wgpu::WgpuSetup {
+    egui_wgpu::WgpuSetup::CreateNew {
+        supported_backends: wgpu::util::backend_bits_from_env().unwrap_or(
+            wgpu::Backends::all().intersection(wgpu::Backends::BROWSER_WEBGPU.complement()),
+        ),
+        power_preference: wgpu::PowerPreference::HighPerformance,
+
+        // It would be nice to force a fallback adapter here.
+        // However, they're not guaranteed to be available on all platforms.
+        force_fallback_adapter: false,
+
+        device_descriptor: std::sync::Arc::new(|_| wgpu::DeviceDescriptor {
+            label: Some("egui-kittest"),
+            ..Default::default()
+        }),
+        trace_path: std::env::var("WGPU_TRACE")
+            .ok()
+            .map(std::path::PathBuf::from),
     }
 }
 
@@ -185,6 +220,8 @@ pub fn try_image_snapshot_options(
     let SnapshotOptions {
         threshold,
         output_path,
+        #[cfg(feature = "wgpu")]
+            wgpu_setup: _,
     } = options;
 
     let path = output_path.join(format!("{name}.png"));
@@ -333,7 +370,7 @@ impl<State> Harness<'_, State> {
         name: &str,
         options: &SnapshotOptions,
     ) -> Result<(), SnapshotError> {
-        let image = crate::wgpu::TestRenderer::new().render(self);
+        let image = crate::wgpu::TestRenderer::new(&options.wgpu_setup).render(self);
         try_image_snapshot_options(&image, name, options)
     }
 
@@ -346,7 +383,7 @@ impl<State> Harness<'_, State> {
     /// Returns a [`SnapshotError`] if the image does not match the snapshot or if there was an error
     /// reading or writing the snapshot.
     pub fn try_wgpu_snapshot(&self, name: &str) -> Result<(), SnapshotError> {
-        let image = crate::wgpu::TestRenderer::new().render(self);
+        let image = crate::wgpu::TestRenderer::new(&default_wgpu_setup()).render(self);
         try_image_snapshot(&image, name)
     }
 
