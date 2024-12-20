@@ -337,6 +337,7 @@ pub type NativeAdapterSelectorMethod = Arc<
         + Send
         + Sync,
 >;
+
 /// Configuration for creating a new wgpu setup.
 ///
 /// Used for [`WgpuSetup::CreateNew`].
