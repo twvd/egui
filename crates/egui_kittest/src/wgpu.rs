@@ -1,15 +1,18 @@
-use crate::texture_to_image::texture_to_image;
-use crate::Harness;
-use egui_wgpu::wgpu::{Backends, InstanceDescriptor, StoreOp, TextureFormat};
-use egui_wgpu::{wgpu, ScreenDescriptor};
+use std::{iter::once, sync::Arc};
+
 use image::RgbaImage;
-use std::iter::once;
-use wgpu::Maintain;
+
+use egui_wgpu::{
+    wgpu::{self, Backends, InstanceDescriptor, StoreOp, TextureFormat},
+    ScreenDescriptor,
+};
+
+use crate::{texture_to_image::texture_to_image, Harness};
 
 /// Utility to render snapshots from a [`Harness`] using [`egui_wgpu`].
 pub struct TestRenderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     dithering: bool,
 }
 
@@ -38,11 +41,11 @@ impl TestRenderer {
         ))
         .expect("Failed to create device");
 
-        Self::create(device, queue)
+        Self::create(Arc::new(device), Arc::new(queue))
     }
 
     /// Create a new [`TestRenderer`] using the provided [`wgpu::Device`] and [`wgpu::Queue`].
-    pub fn create(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    pub fn create(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         Self {
             device,
             queue,
@@ -132,9 +135,7 @@ impl TestRenderer {
                             store: StoreOp::Store,
                         },
                     })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
+                    ..Default::default()
                 })
                 .forget_lifetime();
 
@@ -144,7 +145,7 @@ impl TestRenderer {
         self.queue
             .submit(user_buffers.into_iter().chain(once(encoder.finish())));
 
-        self.device.poll(Maintain::Wait);
+        self.device.poll(wgpu::Maintain::Wait);
 
         texture_to_image(&self.device, &self.queue, &texture)
     }
