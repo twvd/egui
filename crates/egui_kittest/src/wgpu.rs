@@ -20,14 +20,13 @@ impl TestRenderer {
     /// Create a new [`TestRenderer`] using a [`egui_wgpu::WgpuSetup`].
     pub fn new(wgpu_setup: &egui_wgpu::WgpuSetup) -> Self {
         let (device, queue) = match wgpu_setup {
-            egui_wgpu::WgpuSetup::CreateNew {
+            egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
                 supported_backends,
                 power_preference,
-                force_fallback_adapter,
                 device_descriptor,
                 trace_path,
                 native_adapter_selector,
-            } => {
+            }) => {
                 let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                     backends: *supported_backends,
                     ..Default::default()
@@ -45,7 +44,7 @@ impl TestRenderer {
                         pollster::block_on(instance.request_adapter(
                             &wgpu::RequestAdapterOptions {
                                 power_preference: *power_preference,
-                                force_fallback_adapter: *force_fallback_adapter,
+                                force_fallback_adapter: false,
                                 compatible_surface: None,
                             },
                         ))

@@ -44,17 +44,12 @@ impl Default for SnapshotOptions {
 fn default_wgpu_setup() -> egui_wgpu::WgpuSetup {
     use std::sync::Arc;
 
-    egui_wgpu::WgpuSetup::CreateNew {
+    egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
         // WebGPU not supported yet since we rely on blocking screenshots.
         supported_backends: wgpu::util::backend_bits_from_env().unwrap_or(
             wgpu::Backends::all().intersection(wgpu::Backends::BROWSER_WEBGPU.complement()),
         ),
         power_preference: wgpu::PowerPreference::None,
-
-        // It would be nice to force a fallback adapter here.
-        // However, they're not guaranteed to be available on all platforms.
-        // Instead we set the native adapter selector to prefer software rasterizers manually.
-        force_fallback_adapter: false,
 
         native_adapter_selector: Some(Arc::new(|adapters, _surface| {
             let mut adapters = adapters.iter().collect::<Vec<_>>();
@@ -89,10 +84,8 @@ fn default_wgpu_setup() -> egui_wgpu::WgpuSetup {
             ..Default::default()
         }),
 
-        trace_path: std::env::var("WGPU_TRACE")
-            .ok()
-            .map(std::path::PathBuf::from),
-    }
+        ..Default::default()
+    })
 }
 
 impl SnapshotOptions {

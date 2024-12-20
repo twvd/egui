@@ -88,7 +88,6 @@ async fn request_adapter(
     instance: &Instance,
     power_preference: wgpu::PowerPreference,
     surface: &wgpu::Surface<'_>,
-    force_fallback_adapter: bool,
     available_adapters: &[Arc<wgpu::Adapter>],
 ) -> Result<Arc<wgpu::Adapter>, WgpuError> {
     profiling::function_scope!();
@@ -97,7 +96,11 @@ async fn request_adapter(
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference,
             compatible_surface: Some(surface),
-            force_fallback_adapter,
+            // We don't expose this as an option right now since it's fairly rarely useful:
+            // * only has an effect on native
+            // * fails if there's no software rasterizer available
+            // * can achieve the same with `native_adapter_selector`
+            force_fallback_adapter: false,
         })
         .await
         .ok_or_else(|| {
@@ -164,47 +167,46 @@ impl RenderState {
 
         // This is always an empty list on web.
         #[cfg(not(target_arch = "wasm32"))]
-        let available_adapters = instance
-            .enumerate_adapters(wgpu::Backends::all())
-            // TODO(wgpu#6665): Remove layer of `Arc` here once we update to wgpu 24.
-            .into_iter()
-            .map(Arc::new)
-            .collect::<Vec<_>>();
+        let available_adapters = {
+            let backends = if let WgpuSetup::CreateNew(WgpuSetupCreateNew {
+                supported_backends,
+                ..
+            }) = &config.wgpu_setup
+            {
+                *supported_backends
+            } else {
+                wgpu::Backends::all()
+            };
+
+            instance
+                .enumerate_adapters(backends)
+                // TODO(wgpu#6665): Remove layer of `Arc` here once we update to wgpu 24.
+                .into_iter()
+                .map(Arc::new)
+                .collect::<Vec<_>>()
+        };
 
         let (adapter, device, queue) = match config.wgpu_setup.clone() {
-            WgpuSetup::CreateNew {
-                supported_backends: _supported_backends,
+            WgpuSetup::CreateNew(WgpuSetupCreateNew {
+                supported_backends: _,
                 power_preference,
-                force_fallback_adapter,
                 native_adapter_selector,
                 device_descriptor,
                 trace_path,
-            } => {
+            }) => {
                 let adapter = {
                     #[cfg(target_arch = "wasm32")]
                     {
-                        request_adapter(
-                            instance,
-                            power_preference,
-                            surface,
-                            force_fallback_adapter,
-                            &available_adapters,
-                        )
-                        .await
+                        request_adapter(instance, power_preference, surface, &available_adapters)
+                            .await
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(native_adapter_selector) = native_adapter_selector {
                         native_adapter_selector(&available_adapters, Some(surface))
                             .map_err(WgpuError::NoSuitableAdapterFound)
                     } else {
-                        request_adapter(
-                            instance,
-                            power_preference,
-                            surface,
-                            force_fallback_adapter,
-                            &available_adapters,
-                        )
-                        .await
+                        request_adapter(instance, power_preference, surface, &available_adapters)
+                            .await
                     }
                 }?;
 
@@ -284,17 +286,6 @@ pub enum SurfaceErrorAction {
     RecreateSurface,
 }
 
-/// Method for selecting an adapter on native.
-///
-/// This can be used for fully custom adapter selection.
-/// If available, `wgpu::Surface` is passed to allow checking for surface compatibility.
-// TODO(wgpu#6665): Remove layer of `Arc` here.
-pub type NativeAdapterSelectorMethod = Arc<
-    dyn Fn(&[Arc<wgpu::Adapter>], Option<&wgpu::Surface<'_>>) -> Result<Arc<wgpu::Adapter>, String>
-        + Send
-        + Sync,
->;
-
 #[derive(Clone)]
 pub enum WgpuSetup {
     /// Construct a wgpu setup using some predefined settings & heuristics.
@@ -305,50 +296,7 @@ pub enum WgpuSetup {
     /// * `WGPU_BACKEND`: `vulkan`, `dx11`, `dx12`, `metal`, `opengl`, `webgpu`
     /// * `WGPU_POWER_PREF`: `low`, `high` or `none`
     /// * `WGPU_TRACE`: Path to a file to output a wgpu trace file.
-    CreateNew {
-        /// Backends that should be supported (wgpu will pick one of these).
-        ///
-        /// For instance, if you only want to support WebGL (and not WebGPU),
-        /// you can set this to [`wgpu::Backends::GL`].
-        ///
-        /// By default on web, WebGPU will be used if available.
-        /// WebGL will only be used as a fallback,
-        /// and only if you have enabled the `webgl` feature of crate `wgpu`.
-        supported_backends: wgpu::Backends,
-
-        /// Power preference for the adapter.
-        power_preference: wgpu::PowerPreference,
-
-        /// Indicates that only a fallback adapter can be returned.
-        ///
-        /// This is generally a "software" implementation on the system.
-        /// In particular useful for running on CI without a GPU and as a reference for testing.
-        /// Note that not all platforms/setups may have a fallback adapter.
-        ///
-        /// Defaults to `false`.
-        force_fallback_adapter: bool,
-
-        /// Optional selector for native adapters.
-        ///
-        /// This field has no effect when targeting web!
-        /// Otherwise, if set [`WgpuSetup::CreateNew::power_preference`] and
-        /// [`WgpuSetup::CreateNew::force_fallback_adapter`] are ignored and the
-        /// adapter is instead selected by this method.
-        ///
-        /// Defaults to `None`.
-        native_adapter_selector: Option<NativeAdapterSelectorMethod>,
-
-        /// Configuration passed on device request, given an adapter
-        device_descriptor:
-            Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync>,
-
-        /// Option path to output a wgpu trace file.
-        ///
-        /// This only works if this feature is enabled in `wgpu-core`.
-        /// Does not work when running with WebGPU.
-        /// Defaults to the path set in the `WGPU_TRACE` environment variable.
-        trace_path: Option<std::path::PathBuf>,
-    },
+    CreateNew(WgpuSetupCreateNew),
 
     /// Run on an existing wgpu setup.
     Existing {
@@ -362,7 +310,92 @@ pub enum WgpuSetup {
 
 impl Default for WgpuSetup {
     fn default() -> Self {
-        Self::CreateNew {
+        Self::CreateNew(WgpuSetupCreateNew::default())
+    }
+}
+
+impl std::fmt::Debug for WgpuSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CreateNew(create_new) => f
+                .debug_tuple("WgpuSetup::CreateNew")
+                .field(create_new)
+                .finish(),
+            Self::Existing { .. } => f
+                .debug_struct("WgpuSetup::Existing")
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// Method for selecting an adapter on native.
+///
+/// This can be used for fully custom adapter selection.
+/// If available, `wgpu::Surface` is passed to allow checking for surface compatibility.
+// TODO(wgpu#6665): Remove layer of `Arc` here.
+pub type NativeAdapterSelectorMethod = Arc<
+    dyn Fn(&[Arc<wgpu::Adapter>], Option<&wgpu::Surface<'_>>) -> Result<Arc<wgpu::Adapter>, String>
+        + Send
+        + Sync,
+>;
+/// Configuration for creating a new wgpu setup.
+///
+/// Used for [`WgpuSetup::CreateNew`].
+#[derive(Clone)]
+pub struct WgpuSetupCreateNew {
+    /// Backends that should be supported (wgpu will pick one of these).
+    ///
+    /// For instance, if you only want to support WebGL (and not WebGPU),
+    /// you can set this to [`wgpu::Backends::GL`].
+    ///
+    /// By default on web, WebGPU will be used if available.
+    /// WebGL will only be used as a fallback,
+    /// and only if you have enabled the `webgl` feature of crate `wgpu`.
+    pub supported_backends: wgpu::Backends,
+
+    /// Power preference for the adapter.
+    pub power_preference: wgpu::PowerPreference,
+
+    /// Optional selector for native adapters.
+    ///
+    /// This field has no effect when targeting web!
+    /// Otherwise, if set [`WgpuSetup::CreateNew::power_preference`] is ignored and the
+    /// adapter is instead selected by this method.
+    /// Note that [`WgpuSetup::CreateNew::supported_backends`] is still used to
+    /// filter the adapter enumeration in the first place.
+    ///
+    /// Defaults to `None`.
+    pub native_adapter_selector: Option<NativeAdapterSelectorMethod>,
+
+    /// Configuration passed on device request, given an adapter
+    pub device_descriptor:
+        Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync>,
+
+    /// Option path to output a wgpu trace file.
+    ///
+    /// This only works if this feature is enabled in `wgpu-core`.
+    /// Does not work when running with WebGPU.
+    /// Defaults to the path set in the `WGPU_TRACE` environment variable.
+    pub trace_path: Option<std::path::PathBuf>,
+}
+
+impl std::fmt::Debug for WgpuSetupCreateNew {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgpuSetupCreateNew")
+            .field("supported_backends", &self.supported_backends)
+            .field("power_preference", &self.power_preference)
+            .field(
+                "native_adapter_selector",
+                &self.native_adapter_selector.is_some(),
+            )
+            .field("trace_path", &self.trace_path)
+            .finish()
+    }
+}
+
+impl Default for WgpuSetupCreateNew {
+    fn default() -> Self {
+        Self {
             // Add GL backend, primarily because WebGPU is not stable enough yet.
             // (note however, that the GL backend needs to be opted-in via the wgpu feature flag "webgl")
             supported_backends: wgpu::util::backend_bits_from_env()
@@ -370,8 +403,6 @@ impl Default for WgpuSetup {
 
             power_preference: wgpu::util::power_preference_from_env()
                 .unwrap_or(wgpu::PowerPreference::HighPerformance),
-
-            force_fallback_adapter: false,
 
             native_adapter_selector: None,
 
@@ -398,34 +429,6 @@ impl Default for WgpuSetup {
             trace_path: std::env::var("WGPU_TRACE")
                 .ok()
                 .map(std::path::PathBuf::from),
-        }
-    }
-}
-
-impl std::fmt::Debug for WgpuSetup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CreateNew {
-                supported_backends,
-                power_preference,
-                force_fallback_adapter,
-                native_adapter_selector,
-                device_descriptor: _,
-                trace_path,
-            } => f
-                .debug_struct("AdapterSelection::Standard")
-                .field("supported_backends", &supported_backends)
-                .field("force_fallback_adapter", &force_fallback_adapter)
-                .field("power_preference", &power_preference)
-                .field(
-                    "native_adapter_selector",
-                    &native_adapter_selector.is_some(),
-                )
-                .field("trace_path", &trace_path)
-                .finish(),
-            Self::Existing { .. } => f
-                .debug_struct("AdapterSelection::Existing")
-                .finish_non_exhaustive(),
         }
     }
 }
