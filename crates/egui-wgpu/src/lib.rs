@@ -362,10 +362,8 @@ pub struct WgpuSetupCreateNew {
     /// Optional selector for native adapters.
     ///
     /// This field has no effect when targeting web!
-    /// Otherwise, if set [`WgpuSetup::CreateNew::power_preference`] is ignored and the
-    /// adapter is instead selected by this method.
-    /// Note that [`WgpuSetup::CreateNew::supported_backends`] is still used to
-    /// filter the adapter enumeration in the first place.
+    /// Otherwise, if set [`Self::power_preference`] is ignored and the adapter is instead selected by this method.
+    /// Note that [`Self::supported_backends`] is still used to filter the adapter enumeration in the first place.
     ///
     /// Defaults to `None`.
     pub native_adapter_selector: Option<NativeAdapterSelectorMethod>,
