@@ -147,6 +147,9 @@ async fn request_adapter(
         );
     }
 
+    // On wasm, depending on feature flags, wgpu objects may or may not implement sync.
+    // It doesn't make sense to switch to Rc for that special usecase, so simply disable the lint.
+    #[allow(clippy::arc_with_non_send_sync)]
     Ok(Arc::new(adapter))
 }
 
