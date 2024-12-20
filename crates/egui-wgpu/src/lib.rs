@@ -106,7 +106,9 @@ impl RenderState {
             WgpuSetup::CreateNew {
                 supported_backends: _,
                 power_preference,
+                force_fallback_adapter,
                 device_descriptor,
+                trace_path,
             } => {
                 let adapter = {
                     profiling::scope!("request_adapter");
@@ -114,7 +116,7 @@ impl RenderState {
                         .request_adapter(&wgpu::RequestAdapterOptions {
                             power_preference,
                             compatible_surface: Some(surface),
-                            force_fallback_adapter: false,
+                            force_fallback_adapter,
                         })
                         .await
                         .ok_or_else(|| {
@@ -162,14 +164,10 @@ impl RenderState {
                     );
                 }
 
-                let trace_path = std::env::var("WGPU_TRACE");
                 let (device, queue) = {
                     profiling::scope!("request_device");
                     adapter
-                        .request_device(
-                            &(*device_descriptor)(&adapter),
-                            trace_path.ok().as_ref().map(std::path::Path::new),
-                        )
+                        .request_device(&(*device_descriptor)(&adapter), trace_path.as_deref())
                         .await?
                 };
 
@@ -251,6 +249,7 @@ pub enum WgpuSetup {
     /// By default can also be configured with the environment variables:
     /// * `WGPU_BACKEND`: `vulkan`, `dx11`, `dx12`, `metal`, `opengl`, `webgpu`
     /// * `WGPU_POWER_PREF`: `low`, `high` or `none`
+    /// * `WGPU_TRACE`: Path to a file to output a wgpu trace file.
     CreateNew {
         /// Backends that should be supported (wgpu will pick one of these).
         ///
@@ -265,9 +264,23 @@ pub enum WgpuSetup {
         /// Power preference for the adapter.
         power_preference: wgpu::PowerPreference,
 
+        /// Indicates that only a fallback adapter can be returned.
+        ///
+        /// This is generally a "software" implementation on the system.
+        /// In particular useful for running on CI without a GPU and as a reference for testing.
+        /// Defaults to `false`.
+        force_fallback_adapter: bool,
+
         /// Configuration passed on device request, given an adapter
         device_descriptor:
             Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync>,
+
+        /// Option path to output a wgpu trace file.
+        ///
+        /// This only works if this feature is enabled in `wgpu-core`.
+        /// Does not work when running with WebGPU.
+        /// Defaults to the path set in the `WGPU_TRACE` environment variable.
+        trace_path: Option<std::path::PathBuf>,
     },
 
     /// Run on an existing wgpu setup.
@@ -289,6 +302,9 @@ impl Default for WgpuSetup {
 
             power_preference: wgpu::util::power_preference_from_env()
                 .unwrap_or(wgpu::PowerPreference::HighPerformance),
+
+            force_fallback_adapter: false,
+
             device_descriptor: Arc::new(|adapter| {
                 let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
                     wgpu::Limits::downlevel_webgl2_defaults()
@@ -308,6 +324,10 @@ impl Default for WgpuSetup {
                     memory_hints: wgpu::MemoryHints::default(),
                 }
             }),
+
+            trace_path: std::env::var("WGPU_TRACE")
+                .ok()
+                .map(std::path::PathBuf::from),
         }
     }
 }
@@ -318,11 +338,15 @@ impl std::fmt::Debug for WgpuSetup {
             Self::CreateNew {
                 supported_backends,
                 power_preference,
+                force_fallback_adapter,
                 device_descriptor: _,
+                trace_path,
             } => f
                 .debug_struct("AdapterSelection::Standard")
                 .field("supported_backends", &supported_backends)
+                .field("force_fallback_adapter", &force_fallback_adapter)
                 .field("power_preference", &power_preference)
+                .field("trace_path", &trace_path)
                 .finish(),
             Self::Existing { .. } => f
                 .debug_struct("AdapterSelection::Existing")
