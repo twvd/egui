@@ -88,7 +88,7 @@ async fn request_adapter(
     instance: &Instance,
     power_preference: wgpu::PowerPreference,
     surface: &wgpu::Surface<'_>,
-    available_adapters: &[Arc<wgpu::Adapter>],
+    _available_adapters: &[Arc<wgpu::Adapter>],
 ) -> Result<Arc<wgpu::Adapter>, WgpuError> {
     profiling::function_scope!();
 
@@ -105,18 +105,18 @@ async fn request_adapter(
         .await
         .ok_or_else(|| {
             #[cfg(not(target_arch = "wasm32"))]
-            if available_adapters.is_empty() {
+            if _available_adapters.is_empty() {
                 log::info!("No wgpu adapters found");
-            } else if available_adapters.len() == 1 {
+            } else if _available_adapters.len() == 1 {
                 log::info!(
                     "The only available wgpu adapter was not suitable: {}",
-                    adapter_info_summary(&available_adapters[0].get_info())
+                    adapter_info_summary(&_available_adapters[0].get_info())
                 );
             } else {
                 log::info!(
                     "No suitable wgpu adapter found out of the {} available ones: {}",
-                    available_adapters.len(),
-                    describe_adapters(available_adapters)
+                    _available_adapters.len(),
+                    describe_adapters(_available_adapters)
                 );
             }
 
@@ -130,7 +130,7 @@ async fn request_adapter(
     );
 
     #[cfg(not(target_arch = "wasm32"))]
-    if available_adapters.len() == 1 {
+    if _available_adapters.len() == 1 {
         log::debug!(
             "Picked the only available wgpu adapter: {}",
             adapter_info_summary(&adapter.get_info())
@@ -138,8 +138,8 @@ async fn request_adapter(
     } else {
         log::info!(
             "There were {} available wgpu adapters: {}",
-            available_adapters.len(),
-            describe_adapters(available_adapters)
+            _available_adapters.len(),
+            describe_adapters(_available_adapters)
         );
         log::debug!(
             "Picked wgpu adapter: {}",
@@ -190,18 +190,17 @@ impl RenderState {
             WgpuSetup::CreateNew(WgpuSetupCreateNew {
                 supported_backends: _,
                 power_preference,
-                native_adapter_selector,
+                native_adapter_selector: _native_adapter_selector,
                 device_descriptor,
                 trace_path,
             }) => {
                 let adapter = {
                     #[cfg(target_arch = "wasm32")]
                     {
-                        request_adapter(instance, power_preference, surface, &available_adapters)
-                            .await
+                        request_adapter(instance, power_preference, surface, &[]).await
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(native_adapter_selector) = native_adapter_selector {
+                    if let Some(native_adapter_selector) = _native_adapter_selector {
                         native_adapter_selector(&available_adapters, Some(surface))
                             .map_err(WgpuError::NoSuitableAdapterFound)
                     } else {
