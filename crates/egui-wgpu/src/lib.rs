@@ -248,7 +248,7 @@ pub enum WgpuSetup {
     /// This is the default option. You can customize most behaviours overriding the
     /// supported backends, power preferences, and device description.
     ///
-    /// This can also be configured with the environment variables:
+    /// By default can also be configured with the environment variables:
     /// * `WGPU_BACKEND`: `vulkan`, `dx11`, `dx12`, `metal`, `opengl`, `webgpu`
     /// * `WGPU_POWER_PREF`: `low`, `high` or `none`
     CreateNew {
@@ -277,6 +277,39 @@ pub enum WgpuSetup {
         device: Arc<Device>,
         queue: Arc<Queue>,
     },
+}
+
+impl Default for WgpuSetup {
+    fn default() -> Self {
+        Self::CreateNew {
+            // Add GL backend, primarily because WebGPU is not stable enough yet.
+            // (note however, that the GL backend needs to be opted-in via the wgpu feature flag "webgl")
+            supported_backends: wgpu::util::backend_bits_from_env()
+                .unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL),
+
+            power_preference: wgpu::util::power_preference_from_env()
+                .unwrap_or(wgpu::PowerPreference::HighPerformance),
+            device_descriptor: Arc::new(|adapter| {
+                let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                    wgpu::Limits::downlevel_webgl2_defaults()
+                } else {
+                    wgpu::Limits::default()
+                };
+
+                wgpu::DeviceDescriptor {
+                    label: Some("egui wgpu device"),
+                    required_features: wgpu::Features::default(),
+                    required_limits: wgpu::Limits {
+                        // When using a depth buffer, we have to be able to create a texture
+                        // large enough for the entire surface, and we want to support 4k+ displays.
+                        max_texture_dimension_2d: 8192,
+                        ..base_limits
+                    },
+                    memory_hints: wgpu::MemoryHints::default(),
+                }
+            }),
+        }
+    }
 }
 
 impl std::fmt::Debug for WgpuSetup {
@@ -349,42 +382,8 @@ impl Default for WgpuConfiguration {
     fn default() -> Self {
         Self {
             present_mode: wgpu::PresentMode::AutoVsync,
-
             desired_maximum_frame_latency: None,
-
-            // By default, create a new wgpu setup. This will create a new instance, adapter, device and queue.
-            // This will create an instance for the supported backends (which can be configured by
-            // `WGPU_BACKEND`), and will pick an adapter by iterating adapters based on their power preference. The power
-            // preference can also be configured by `WGPU_POWER_PREF`.
-            wgpu_setup: WgpuSetup::CreateNew {
-                // Add GL backend, primarily because WebGPU is not stable enough yet.
-                // (note however, that the GL backend needs to be opted-in via the wgpu feature flag "webgl")
-                supported_backends: wgpu::util::backend_bits_from_env()
-                    .unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL),
-
-                power_preference: wgpu::util::power_preference_from_env()
-                    .unwrap_or(wgpu::PowerPreference::HighPerformance),
-                device_descriptor: Arc::new(|adapter| {
-                    let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    };
-
-                    wgpu::DeviceDescriptor {
-                        label: Some("egui wgpu device"),
-                        required_features: wgpu::Features::default(),
-                        required_limits: wgpu::Limits {
-                            // When using a depth buffer, we have to be able to create a texture
-                            // large enough for the entire surface, and we want to support 4k+ displays.
-                            max_texture_dimension_2d: 8192,
-                            ..base_limits
-                        },
-                        memory_hints: wgpu::MemoryHints::default(),
-                    }
-                }),
-            },
-
+            wgpu_setup: Default::default(),
             on_surface_error: Arc::new(|err| {
                 if err == wgpu::SurfaceError::Outdated {
                     // This error occurs when the app is minimized on Windows.
