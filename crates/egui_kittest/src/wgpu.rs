@@ -26,18 +26,32 @@ impl TestRenderer {
                 force_fallback_adapter,
                 device_descriptor,
                 trace_path,
+                native_adapter_selector,
             } => {
                 let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                     backends: *supported_backends,
                     ..Default::default()
                 });
-                let adapter =
-                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: *power_preference,
-                        force_fallback_adapter: *force_fallback_adapter,
-                        compatible_surface: None,
-                    }))
-                    .expect("No adapter found");
+
+                let adapter = if let Some(native_adapter_selector) = native_adapter_selector {
+                    let adapters = instance
+                        .enumerate_adapters(*supported_backends)
+                        .into_iter()
+                        .map(Arc::new)
+                        .collect::<Vec<_>>();
+                    native_adapter_selector(&adapters, None).expect("No adapter found.")
+                } else {
+                    Arc::new(
+                        pollster::block_on(instance.request_adapter(
+                            &wgpu::RequestAdapterOptions {
+                                power_preference: *power_preference,
+                                force_fallback_adapter: *force_fallback_adapter,
+                                compatible_surface: None,
+                            },
+                        ))
+                        .expect("No adapter found using `request_adapter`"),
+                    )
+                };
 
                 let device_descriptor = device_descriptor(&adapter);
                 let (device, queue) = pollster::block_on(

@@ -40,8 +40,8 @@ use epaint::mutex::RwLock;
 /// An error produced by egui-wgpu.
 #[derive(thiserror::Error, Debug)]
 pub enum WgpuError {
-    #[error("Failed to create wgpu adapter, no suitable adapter found.")]
-    NoSuitableAdapterFound,
+    #[error("Failed to create wgpu adapter, no suitable adapter found: {0}")]
+    NoSuitableAdapterFound(String),
 
     #[error("There was no valid format for the surface at all.")]
     NoSurfaceFormatsAvailable,
@@ -67,8 +67,9 @@ pub struct RenderState {
     ///
     /// This is not available on web.
     /// On web, we always select WebGPU is available, then fall back to WebGL if not.
+    // TODO(wgpu#6665): Remove layer of `Arc` here once we update to wgpu 24
     #[cfg(not(target_arch = "wasm32"))]
-    pub available_adapters: Arc<[wgpu::Adapter]>,
+    pub available_adapters: Arc<[Arc<wgpu::Adapter>]>,
 
     /// Wgpu device used for rendering, created from the adapter.
     pub device: Arc<wgpu::Device>,
@@ -81,6 +82,69 @@ pub struct RenderState {
 
     /// Egui renderer responsible for drawing the UI.
     pub renderer: Arc<RwLock<Renderer>>,
+}
+
+async fn request_adapter(
+    instance: &Instance,
+    power_preference: wgpu::PowerPreference,
+    surface: &wgpu::Surface<'_>,
+    force_fallback_adapter: bool,
+    available_adapters: &[Arc<wgpu::Adapter>],
+) -> Result<Arc<wgpu::Adapter>, WgpuError> {
+    profiling::function_scope!();
+
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference,
+            compatible_surface: Some(surface),
+            force_fallback_adapter,
+        })
+        .await
+        .ok_or_else(|| {
+            #[cfg(not(target_arch = "wasm32"))]
+            if available_adapters.is_empty() {
+                log::info!("No wgpu adapters found");
+            } else if available_adapters.len() == 1 {
+                log::info!(
+                    "The only available wgpu adapter was not suitable: {}",
+                    adapter_info_summary(&available_adapters[0].get_info())
+                );
+            } else {
+                log::info!(
+                    "No suitable wgpu adapter found out of the {} available ones: {}",
+                    available_adapters.len(),
+                    describe_adapters(available_adapters)
+                );
+            }
+
+            WgpuError::NoSuitableAdapterFound("`request_adapters` returned `None`".to_owned())
+        })?;
+
+    #[cfg(target_arch = "wasm32")]
+    log::debug!(
+        "Picked wgpu adapter: {}",
+        adapter_info_summary(&adapter.get_info())
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if available_adapters.len() == 1 {
+        log::debug!(
+            "Picked the only available wgpu adapter: {}",
+            adapter_info_summary(&adapter.get_info())
+        );
+    } else {
+        log::info!(
+            "There were {} available wgpu adapters: {}",
+            available_adapters.len(),
+            describe_adapters(available_adapters)
+        );
+        log::debug!(
+            "Picked wgpu adapter: {}",
+            adapter_info_summary(&adapter.get_info())
+        );
+    }
+
+    Ok(Arc::new(adapter))
 }
 
 impl RenderState {
@@ -100,69 +164,49 @@ impl RenderState {
 
         // This is always an empty list on web.
         #[cfg(not(target_arch = "wasm32"))]
-        let available_adapters = instance.enumerate_adapters(wgpu::Backends::all());
+        let available_adapters = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            // TODO(wgpu#6665): Remove layer of `Arc` here once we update to wgpu 24.
+            .into_iter()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
 
         let (adapter, device, queue) = match config.wgpu_setup.clone() {
             WgpuSetup::CreateNew {
-                supported_backends: _,
+                supported_backends: _supported_backends,
                 power_preference,
                 force_fallback_adapter,
+                native_adapter_selector,
                 device_descriptor,
                 trace_path,
             } => {
                 let adapter = {
-                    profiling::scope!("request_adapter");
-                    instance
-                        .request_adapter(&wgpu::RequestAdapterOptions {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        request_adapter(
+                            instance,
                             power_preference,
-                            compatible_surface: Some(surface),
+                            surface,
                             force_fallback_adapter,
-                        })
+                            &available_adapters,
+                        )
                         .await
-                        .ok_or_else(|| {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if available_adapters.is_empty() {
-                                log::info!("No wgpu adapters found");
-                            } else if available_adapters.len() == 1 {
-                                log::info!(
-                                    "The only available wgpu adapter was not suitable: {}",
-                                    adapter_info_summary(&available_adapters[0].get_info())
-                                );
-                            } else {
-                                log::info!(
-                                    "No suitable wgpu adapter found out of the {} available ones: {}",
-                                    available_adapters.len(),
-                                    describe_adapters(&available_adapters)
-                                );
-                            }
-
-                            WgpuError::NoSuitableAdapterFound
-                        })?
-                };
-
-                #[cfg(target_arch = "wasm32")]
-                log::debug!(
-                    "Picked wgpu adapter: {}",
-                    adapter_info_summary(&adapter.get_info())
-                );
-
-                #[cfg(not(target_arch = "wasm32"))]
-                if available_adapters.len() == 1 {
-                    log::debug!(
-                        "Picked the only available wgpu adapter: {}",
-                        adapter_info_summary(&adapter.get_info())
-                    );
-                } else {
-                    log::info!(
-                        "There were {} available wgpu adapters: {}",
-                        available_adapters.len(),
-                        describe_adapters(&available_adapters)
-                    );
-                    log::debug!(
-                        "Picked wgpu adapter: {}",
-                        adapter_info_summary(&adapter.get_info())
-                    );
-                }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(native_adapter_selector) = native_adapter_selector {
+                        native_adapter_selector(&available_adapters, Some(surface))
+                            .map_err(WgpuError::NoSuitableAdapterFound)
+                    } else {
+                        request_adapter(
+                            instance,
+                            power_preference,
+                            surface,
+                            force_fallback_adapter,
+                            &available_adapters,
+                        )
+                        .await
+                    }
+                }?;
 
                 let (device, queue) = {
                     profiling::scope!("request_device");
@@ -174,7 +218,7 @@ impl RenderState {
                 // On wasm, depending on feature flags, wgpu objects may or may not implement sync.
                 // It doesn't make sense to switch to Rc for that special usecase, so simply disable the lint.
                 #[allow(clippy::arc_with_non_send_sync)]
-                (Arc::new(adapter), Arc::new(device), Arc::new(queue))
+                (adapter, Arc::new(device), Arc::new(queue))
             }
             WgpuSetup::Existing {
                 instance: _,
@@ -214,7 +258,7 @@ impl RenderState {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn describe_adapters(adapters: &[wgpu::Adapter]) -> String {
+fn describe_adapters(adapters: &[Arc<wgpu::Adapter>]) -> String {
     if adapters.is_empty() {
         "(none)".to_owned()
     } else if adapters.len() == 1 {
@@ -239,6 +283,17 @@ pub enum SurfaceErrorAction {
     /// Instructs egui to recreate the surface, then skip the current frame.
     RecreateSurface,
 }
+
+/// Method for selecting an adapter on native.
+///
+/// This can be used for fully custom adapter selection.
+/// If available, `wgpu::Surface` is passed to allow checking for surface compatibility.
+// TODO(wgpu#6665): Remove layer of `Arc` here.
+pub type NativeAdapterSelectorMethod = Arc<
+    dyn Fn(&[Arc<wgpu::Adapter>], Option<&wgpu::Surface<'_>>) -> Result<Arc<wgpu::Adapter>, String>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub enum WgpuSetup {
@@ -273,6 +328,16 @@ pub enum WgpuSetup {
         /// Defaults to `false`.
         force_fallback_adapter: bool,
 
+        /// Optional selector for native adapters.
+        ///
+        /// This field has no effect when targeting web!
+        /// Otherwise, if set [`WgpuSetup::CreateNew::power_preference`] and
+        /// [`WgpuSetup::CreateNew::force_fallback_adapter`] are ignored and the
+        /// adapter is instead selected by this method.
+        ///
+        /// Defaults to `None`.
+        native_adapter_selector: Option<NativeAdapterSelectorMethod>,
+
         /// Configuration passed on device request, given an adapter
         device_descriptor:
             Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync>,
@@ -287,6 +352,7 @@ pub enum WgpuSetup {
 
     /// Run on an existing wgpu setup.
     Existing {
+        // TODO(wgpu#6665): Remove layer of `Arc` here once we update to wgpu 24
         instance: Arc<Instance>,
         adapter: Arc<Adapter>,
         device: Arc<Device>,
@@ -306,6 +372,8 @@ impl Default for WgpuSetup {
                 .unwrap_or(wgpu::PowerPreference::HighPerformance),
 
             force_fallback_adapter: false,
+
+            native_adapter_selector: None,
 
             device_descriptor: Arc::new(|adapter| {
                 let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
@@ -341,6 +409,7 @@ impl std::fmt::Debug for WgpuSetup {
                 supported_backends,
                 power_preference,
                 force_fallback_adapter,
+                native_adapter_selector,
                 device_descriptor: _,
                 trace_path,
             } => f
@@ -348,6 +417,10 @@ impl std::fmt::Debug for WgpuSetup {
                 .field("supported_backends", &supported_backends)
                 .field("force_fallback_adapter", &force_fallback_adapter)
                 .field("power_preference", &power_preference)
+                .field(
+                    "native_adapter_selector",
+                    &native_adapter_selector.is_some(),
+                )
                 .field("trace_path", &trace_path)
                 .finish(),
             Self::Existing { .. } => f

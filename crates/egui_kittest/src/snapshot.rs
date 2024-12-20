@@ -23,6 +23,8 @@ pub struct SnapshotOptions {
     ///
     /// Note that no [`wgpu::Surface`] is needed for the snapshot tests,
     /// therefore adapter creation doesn't have to be constrained on compatible surfaces.
+    ///
+    /// Will prefer software rasterizers when possible.
     #[cfg(feature = "wgpu")]
     pub wgpu_setup: egui_wgpu::WgpuSetup,
 }
@@ -40,20 +42,53 @@ impl Default for SnapshotOptions {
 
 #[cfg(feature = "wgpu")]
 fn default_wgpu_setup() -> egui_wgpu::WgpuSetup {
+    use std::sync::Arc;
+
     egui_wgpu::WgpuSetup::CreateNew {
+        // WebGPU not supported yet since we rely on blocking screenshots.
         supported_backends: wgpu::util::backend_bits_from_env().unwrap_or(
             wgpu::Backends::all().intersection(wgpu::Backends::BROWSER_WEBGPU.complement()),
         ),
-        power_preference: wgpu::PowerPreference::HighPerformance,
+        power_preference: wgpu::PowerPreference::None,
 
         // It would be nice to force a fallback adapter here.
         // However, they're not guaranteed to be available on all platforms.
+        // Instead we set the native adapter selector to prefer software rasterizers manually.
         force_fallback_adapter: false,
+
+        native_adapter_selector: Some(Arc::new(|adapters, _surface| {
+            let mut adapters = adapters.iter().collect::<Vec<_>>();
+
+            // Adapters are already sorted by preferred backend by wgpu, but let's be explicit.
+            adapters.sort_by_key(|a| match a.get_info().backend {
+                wgpu::Backend::Metal => 0,
+                wgpu::Backend::Vulkan => 1,
+                wgpu::Backend::Dx12 => 2,
+                wgpu::Backend::Gl => 4,
+                wgpu::Backend::BrowserWebGpu => 6,
+                wgpu::Backend::Empty => 7,
+            });
+
+            // Prefer CPU adapters, otherwise if we can't go with discrete GPU.
+            adapters.sort_by_key(|a| match a.get_info().device_type {
+                wgpu::DeviceType::Cpu => 0, // CPU is the best for our purposes!
+                wgpu::DeviceType::DiscreteGpu => 1,
+                wgpu::DeviceType::Other
+                | wgpu::DeviceType::IntegratedGpu
+                | wgpu::DeviceType::VirtualGpu => 2,
+            });
+
+            adapters
+                .first()
+                .map(|a| (*a).clone())
+                .ok_or("No adapter found".to_owned())
+        })),
 
         device_descriptor: std::sync::Arc::new(|_| wgpu::DeviceDescriptor {
             label: Some("egui-kittest"),
             ..Default::default()
         }),
+
         trace_path: std::env::var("WGPU_TRACE")
             .ok()
             .map(std::path::PathBuf::from),
